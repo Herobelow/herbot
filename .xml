@@ -1,0 +1,160 @@
+<xml xmlns="https://developers.google.com/blockly/xml" is_dbot="true" collection="false">
+  <variables>
+    <variable id="stake">Stake</variable>
+    <variable id="max_loss">MaxLoss</variable>
+    <variable id="max_profit">MaxProfit</variable>
+    <variable id="current_profit">CurrentProfit</variable>
+    <variable id="current_loss">CurrentLoss</variable>
+    <variable id="indicator_value">IndicatorValue</variable>
+    <variable id="market_trend">MarketTrend</variable>
+    <variable id="stop_loss">StopLoss</variable>
+    <variable id="take_profit">TakeProfit</variable>
+  </variables>
+  <block type="trade_definition" id="main_trade_block" deletable="false" x="0" y="60">
+    <statement name="TRADE_OPTIONS">
+      <block type="trade_definition_market" id="market_setup">
+        <field name="MARKET_LIST">synthetic_index</field>
+        <field name="SUBMARKET_LIST">random_index</field>
+        <field name="SYMBOL_LIST">R_25</field>
+        <next>
+          <block type="trade_definition_tradetype" id="trade_type">
+            <field name="TRADETYPECAT_LIST">digits</field>
+            <field name="TRADETYPE_LIST">overunder</field>
+            <next>
+              <block type="trade_definition_contracttype" id="contract_type">
+                <field name="TYPE_LIST">both</field>
+                <next>
+                  <block type="trade_definition_candleinterval" id="candle_interval">
+                    <field name="CANDLEINTERVAL_LIST">60</field>
+                    <next>
+                      <block type="trade_definition_restartbuysell" id="restart_option">
+                        <field name="TIME_MACHINE_ENABLED">FALSE</field>
+                        <next>
+                          <block type="trade_definition_restartonerror" id="restart_error">
+                            <field name="RESTARTONERROR">TRUE</field>
+                          </block>
+                        </next>
+                      </block>
+                    </next>
+                  </block>
+                </next>
+              </block>
+            </next>
+          </block>
+        </next>
+      </block>
+    </statement>
+    <statement name="INITIALIZATION">
+      <block type="variables_set" id="init_stake">
+        <field name="VAR" id="stake">Stake</field>
+        <value name="VALUE">
+          <block type="math_number" id="stake_value">
+            <field name="NUM">10</field>
+          </block>
+        </value>
+        <next>
+          <block type="variables_set" id="init_max_loss">
+            <field name="VAR" id="max_loss">MaxLoss</field>
+            <value name="VALUE">
+              <block type="math_number" id="max_loss_value">
+                <field name="NUM">50</field>
+              </block>
+            </value>
+            <next>
+              <block type="variables_set" id="init_max_profit">
+                <field name="VAR" id="max_profit">MaxProfit</field>
+                <value name="VALUE">
+                  <block type="math_number" id="max_profit_value">
+                    <field name="NUM">100</field>
+                  </block>
+                </value>
+                <next>
+                  <block type="variables_set" id="init_current_profit">
+                    <field name="VAR" id="current_profit">CurrentProfit</field>
+                    <value name="VALUE">
+                      <block type="math_number" id="current_profit_value">
+                        <field name="NUM">0</field>
+                      </block>
+                    </value>
+                    <next>
+                      <block type="variables_set" id="init_current_loss">
+                        <field name="VAR" id="current_loss">CurrentLoss</field>
+                        <value name="VALUE">
+                          <block type="math_number" id="current_loss_value">
+                            <field name="NUM">0</field>
+                          </block>
+                        </value>
+                      </block>
+                    </next>
+                  </block>
+                </next>
+              </block>
+            </next>
+          </block>
+        </next>
+      </block>
+    </statement>
+    <statement name="SUBMARKET">
+      <block type="trade_definition_tradeoptions" id="trade_options">
+        <mutation has_first_barrier="false" has_second_barrier="false" has_prediction="true"></mutation>
+        <field name="DURATIONTYPE_LIST">t</field>
+        <value name="DURATION">
+          <shadow type="math_number_positive" id="duration_value">
+            <field name="NUM">1</field>
+          </shadow>
+        </value>
+        <value name="AMOUNT">
+          <shadow type="math_number_positive" id="amount_value">
+            <field name="NUM">1</field>
+          </shadow>
+          <block type="variables_get" id="stake_amount">
+            <field name="VAR" id="stake">Stake</field>
+          </block>
+        </value>
+      </block>
+    </statement>
+    <statement name="BEFOREPURCHASE_STACK">
+      <block type="logic_if" id="risk_check">
+        <value name="IF0">
+          <block type="logic_compare" id="check_risk">
+            <field name="OP">LT</field>
+            <value name="A">
+              <block type="variables_get" id="current_loss_check">
+                <field name="VAR" id="current_loss">CurrentLoss</field>
+              </block>
+            </value>
+            <value name="B">
+              <block type="variables_get" id="max_loss_check">
+                <field name="VAR" id="max_loss">MaxLoss</field>
+              </block>
+            </value>
+          </block>
+        </value>
+        <statement name="DO0">
+          <block type="logic_if" id="trend_check">
+            <value name="IF0">
+              <block type="logic_compare" id="trend_compare">
+                <field name="OP">EQ</field>
+                <value name="A">
+                  <block type="variables_get" id="market_trend_check">
+                    <field name="VAR" id="market_trend">MarketTrend</field>
+                  </block>
+                </value>
+                <value name="B">
+                  <block type="text" id="up_trend">
+                    <field name="TEXT">up</field>
+                  </block>
+                </value>
+              </block>
+            </value>
+            <statement name="DO0">
+              <block type="purchase" id="buy_option">
+                <field name="PURCHASE_LIST">DIGITOVER</field>
+              </block>
+            </statement>
+          </block>
+        </statement>
+      </block>
+    </statement>
+  </block>
+</xml>
