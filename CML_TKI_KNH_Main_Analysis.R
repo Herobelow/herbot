@@ -1620,6 +1620,42 @@ if (!is.null(cox_os)) {
   print(cox_var_tbl)
 }
 
+# --- Significance verdict: Grade 3+ ADR among the survival predictors ---------------
+# Univariable AND multivariable, for OS and PFS - the direct answer to
+# "is Grade 3+ ADR a significant predictor?"
+adr_sig <- tibble()
+for (ep in c("OS", "PFS")) {
+  cx <- if (ep == "OS") cox_os else cox_pfs
+  if (is.null(cx)) next
+  u <- if (nrow(cx$univ) > 0) cx$univ %>% filter(Covariate == "flag_ADR_sev") else tibble()
+  m <- if (nrow(cx$multiv) > 0) cx$multiv %>% filter(Covariate == "flag_ADR_sev") else tibble()
+  if (nrow(u) > 0) {
+    adr_sig <- bind_rows(adr_sig, tibble(
+      Outcome = ep, Model = "Univariable",
+      HR = round(u$HR[1], 2),
+      CI95 = paste0(round(u$conf.low[1], 2), " - ", round(u$conf.high[1], 2)),
+      P_value = u$p.value[1],
+      P_report = fmt_p(u$p.value[1]),
+      Significant_at_5pct = if (u$p.value[1] < 0.05) "YES" else "NO"))
+  }
+  if (nrow(m) > 0) {
+    adr_sig <- bind_rows(adr_sig, tibble(
+      Outcome = ep, Model = "Multivariable (adjusted)",
+      HR = round(m$HR[1], 2),
+      CI95 = paste0(round(m$conf.low[1], 2), " - ", round(m$conf.high[1], 2)),
+      P_value = m$p.value[1],
+      P_report = fmt_p(m$p.value[1]),
+      Significant_at_5pct = if (m$p.value[1] < 0.05) "YES" else "NO"))
+  }
+}
+if (nrow(adr_sig) > 0) {
+  save_csv(adr_sig, "O3_09_Grade3plus_ADR_Significance_Summary.csv")
+  message("\n>>> GRADE 3+ ADR AS A PREDICTOR - significance summary (panel xi):\n")
+  print(adr_sig)
+} else {
+  message("\n>>> Grade 3+ ADR significance summary not available (insufficient data).")
+}
+
 # =============================================================================
 # 7. OBJECTIVE 4 - PREVALENCE OF ADVERSE DRUG REACTIONS
 # =============================================================================
@@ -1984,6 +2020,17 @@ if (nrow(adr_univ_out) > 0) {
   cat("Grade 3+ ADR status (yes/no) was also FORCED into the multivariable OS and PFS\n")
   cat("models above (retained even if its univariable p >= 0.20); line of therapy was\n")
   cat("forced in as well (panel comment x).\n\n")
+}
+
+if (nrow(adr_sig) > 0) {
+  cat("IS Grade 3+ ADR A SIGNIFICANT PREDICTOR? (univariable vs multivariable)\n")
+  for (i in seq_len(nrow(adr_sig))) {
+    cat("   - ", adr_sig$Outcome[i], " / ", adr_sig$Model[i], ": HR ",
+        adr_sig$HR[i], " (95% CI ", adr_sig$CI95[i], "), p = ",
+        adr_sig$P_report[i], " -> ", adr_sig$Significant_at_5pct[i],
+        " significant at the 5% level\n", sep = "")
+  }
+  cat("Full table: O3_09_Grade3plus_ADR_Significance_Summary.csv\n\n")
 }
 
 # --- Objective 4 (ADRs) -------------------------------------------------------------------
