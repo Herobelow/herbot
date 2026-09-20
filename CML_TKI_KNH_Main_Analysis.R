@@ -36,6 +36,11 @@
 #   (vii)  Reordering of objectives                -> overall file structure
 #   (viii) Sequential TKI use                      -> Section 4.5  (O1_08/09)
 #   (ix)   ADR distribution by individual drug     -> Section 7.3  (O4_05)
+#   (x)    Line of therapy (1L vs subsequent)      -> Section 4.5b (O1_14) +
+#                                                    5.1b (O2_09..11) + Cox
+#   (xi)   Grade 3+ ADRs -> OS/PFS: univariable
+#                            + forced into the multivariable model
+#                                                    -> Section 6 (O3_08)
 #
 #  IMPORTANT - DATA LIMITATIONS (state in the thesis):
 #   * The dataset records only the CURRENT/primary TKI per patient (a single
@@ -396,8 +401,8 @@ class_signal <- function(adr_type) {
 # `data` must contain Time, Event and (where available) the candidate
 # covariates. Returns univ / multiv / zph tables, the fitted model, and the
 # number of events and covariates used (for EPV reporting).
-run_cox_models <- function(data) {
-  candidate_names <- c("Phase_group", "Age_group", "Sex", "TKI_Group",
+run_cox_models <- function(data, force_vars = character(0)) {
+  candidate_names <- c("Phase_group", "Age_group", "Sex", "TKI_Group", "LOT",
                        "flag_T315I", "flag_ADR_any", "flag_ADR_sev",
                        "flag_Progression", "flag_Relapse", "flag_Comorbidity",
                        "BCR_monitored", "mod_switch")
@@ -406,6 +411,7 @@ run_cox_models <- function(data) {
     Age_group        = "Age group (<40 / 40-59 / >=60 years)",
     Sex              = "Sex",
     TKI_Group        = "Recorded TKI group (1G/2G/3G)",
+    LOT              = "Line of therapy (1L imatinib vs >=2L subsequent, inferred)",
     flag_T315I       = "T315I mutation",
     flag_ADR_any     = "Any ADR",
     flag_ADR_sev     = "Grade 3+ ADR",
@@ -473,14 +479,24 @@ run_cox_models <- function(data) {
   sel <- unique(univ$Covariate[univ$p.value < VAR_ENTRY_P])
   if (length(sel) == 0) sel <- keep
 
+  # Panel requirement (xi): Grade 3+ ADR status and line of therapy must
+  # appear in the multivariable model even if their univariable p >= 0.20.
+  sel <- union(sel, intersect(force_vars, keep))
+
   # EPV guard (panel comment vi): limit covariates to ~events/EPV_MIN.
+  # Forced covariates are retained; remaining slots go to the most
+  # significant univariable p-values.
   max_cov <- max(2L, as.integer(floor(n_events / EPV_MIN)))
   if (length(sel) > max_cov) {
+    forced <- intersect(force_vars, sel)
     pv <- aggregate(p.value ~ Covariate, data = univ, FUN = min)
-    sel <- head(pv$Covariate[order(pv$p.value, na.last = TRUE)], max_cov)
+    ranked <- pv$Covariate[order(pv$p.value, na.last = TRUE)]
+    rest <- ranked[ranked %in% setdiff(sel, forced)]
+    sel <- c(forced, head(rest, max(0L, max_cov - length(forced))))
     message("    EPV guard: multivariable model limited to ", max_cov,
             " covariates (events = ", n_events, "; ", EPV_MIN,
-            " events per covariate).")
+            " events per covariate); retained forced covariates: ",
+            if (length(forced) > 0) paste(forced, collapse = ", ") else "none", ".")
   }
 
   if (length(sel) >= 1) {
@@ -868,6 +884,30 @@ df$seq_inferred <- mapply(function(other, tki) {
 idx3 <- which(!is.na(df$TKI_Group) & df$TKI_Group == "3G" & is.na(df$seq_inferred))
 df$seq_inferred[idx3] <- "prior TKI(s) -> ponatinib"
 
+# --- Line of therapy (LOT): 1L vs subsequent lines (panel comment x) --------------
+# Rationale (panel): the dataset records only the CURRENT TKI. Patients whose
+# recorded TKI is a 2nd/3rd-generation agent have, in routine practice,
+# essentially all received imatinib as 1L within the study period before
+# switching. Treating "imatinib vs later-generation TKI" as a first-line
+# comparison is therefore misleading: subsequent-line patients are selected
+# for prior treatment failure, relapse or progression (confounding by
+# indication). LOT is INFERRED from the recorded TKI; documented switches are
+# captured separately via TKI_Treatment_Modification. Ponatinib patients may
+# be 2L or 3L - both are grouped as ">=2L" (not distinguishable from the
+# recorded current TKI alone).
+df$LOT <- factor(
+  case_when(
+    df$TKI_Group == "1G" ~ "1L (imatinib)",
+    df$TKI_Group %in% c("2G", "3G") ~ ">=2L (subsequent line)",
+    TRUE ~ NA_character_
+  ),
+  levels = c("1L (imatinib)", ">=2L (subsequent line)")
+)
+message(">>> Inferred line of therapy: ",
+        sum(df$LOT == "1L (imatinib)", na.rm = TRUE), " on 1L (imatinib) | ",
+        sum(df$LOT == ">=2L (subsequent line)", na.rm = TRUE),
+        " on subsequent line(s) [2G/3G TKI recorded - prior imatinib presumed].")
+
 # --- group data set (AFTER all derived columns exist) -----------------------------
 df_groups <- df %>% filter(!is.na(TKI_Group))
 message(">>> Patients with a classifiable recorded TKI group: ", nrow(df_groups),
@@ -875,7 +915,7 @@ message(">>> Patients with a classifiable recorded TKI group: ", nrow(df_groups)
 
 # --- analysis data sets (complete cases for each endpoint) -----------------------------
 extra_cols <- intersect(
-  c("Study_ID", "tki_clean", "TKI_Group", "Age_num", "Age_group", "Sex",
+  c("Study_ID", "tki_clean", "TKI_Group", "LOT", "Age_num", "Age_group", "Sex",
     "Phase_raw", "Phase_group", "flag_T315I", "flag_ADR_any", "flag_ADR_sev",
     "flag_Relapse", "flag_Progression", "flag_Comorbidity", "BCR_monitored",
     "mod_switch", "mod_interruption", "any_modification"),
@@ -1084,6 +1124,27 @@ seq_summary <- tibble(
 save_csv(seq_summary, "O1_09_Sequential_TKI_Use_Summary.csv")
 print(seq_summary)
 
+# --- 4.5b Line of therapy: 1L vs subsequent lines (panel comment x) -----------------
+message("    Panel comment (x): line of therapy (1L vs subsequent lines)...")
+
+lot_tab <- df_groups %>%
+  count(LOT, name = "n", sort = TRUE) %>%
+  mutate(Percent_of_classifiable = round(100 * n / nrow(df_groups), 1))
+
+lot_breakdown <- df_groups %>%
+  filter(LOT == ">=2L (subsequent line)") %>%
+  count(TKI_Group, tki_clean, name = "n", sort = TRUE) %>%
+  mutate(Percent_of_subsequent_line = round(100 * n / sum(n), 1)) %>%
+  rename(recorded_TKI = tki_clean)
+
+save_csv(lot_tab, "O1_14a_LOT_Categorisation.csv")
+save_csv(lot_breakdown, "O1_14b_LOT_Subsequent_Line_Breakdown.csv")
+print(lot_tab)
+print(lot_breakdown)
+message("    NOTE: LOT is inferred from the recorded (current) TKI - every patient on a")
+message("    2G/3G TKI is assumed to have received imatinib as 1L first. Later-line")
+message("    outcomes must NOT be read as inherent drug inferiority.")
+
 # --- 4.6 Ponatinib (3G) patient detail (panel correction block) ---------------------
 pon_detail <- df %>%
   filter(TKI_Group == "3G") %>%
@@ -1224,6 +1285,56 @@ if (have_pfs && nrow(pfs_data) >= 5) {
   message("    Skipped PFS analysis (insufficient PFS data).")
 }
 
+# --- 5.1b KM by inferred line of therapy: 1L vs >=2L (panel comment x) ------------------
+lot_rows <- list()
+if (have_os && "LOT" %in% names(os_data)) {
+  os_lot_d <- os_data %>% filter(!is.na(LOT))
+  if (nrow(os_lot_d) >= 5 && length(unique(os_lot_d$LOT)) >= 2) {
+    fit_os_lot <- survfit(Surv(Time, Event) ~ LOT, data = os_lot_d)
+    p_os_lot <- ggsurvplot(
+      fit_os_lot, data = os_lot_d,
+      pval = TRUE, conf.int = TRUE, risk.table = TRUE, risk.table.height = 0.2,
+      legend.labs = c("1L (imatinib)" = "1L (imatinib)",
+                      ">=2L (subsequent line)" = "Subsequent line (>=2L)"),
+      title = "Overall survival by line of therapy (inferred)",
+      subtitle = "1L = recorded imatinib; >=2L = recorded 2G/3G TKI (prior imatinib presumed)",
+      xlab = "Follow-up (months)", ylab = "Probability of survival",
+      print = FALSE
+    )
+    save_fig(p_os_lot, "O2_09_KM_OS_by_LOT.png")
+    p_lot <- logrank_p(os_lot_d, "LOT")
+    lot_rows <- c(lot_rows, list(tibble(
+      Outcome = "OS", Comparison = "1L vs >=2L (inferred LOT)",
+      N = nrow(os_lot_d), P_value = p_lot, P_report = fmt_p(p_lot))))
+  }
+}
+if (have_pfs && "LOT" %in% names(pfs_data)) {
+  pfs_lot_d <- pfs_data %>% filter(!is.na(LOT))
+  if (nrow(pfs_lot_d) >= 5 && length(unique(pfs_lot_d$LOT)) >= 2) {
+    fit_pfs_lot <- survfit(Surv(Time, Event) ~ LOT, data = pfs_lot_d)
+    p_pfs_lot <- ggsurvplot(
+      fit_pfs_lot, data = pfs_lot_d,
+      pval = TRUE, conf.int = TRUE, risk.table = TRUE, risk.table.height = 0.2,
+      legend.labs = c("1L (imatinib)" = "1L (imatinib)",
+                      ">=2L (subsequent line)" = "Subsequent line (>=2L)"),
+      title = "Progression-free survival by line of therapy (inferred)",
+      subtitle = "1L = recorded imatinib; >=2L = recorded 2G/3G TKI (prior imatinib presumed)",
+      xlab = "Follow-up (months)", ylab = "Probability of being progression-free",
+      print = FALSE
+    )
+    save_fig(p_pfs_lot, "O2_10_KM_PFS_by_LOT.png")
+    p_lot <- logrank_p(pfs_lot_d, "LOT")
+    lot_rows <- c(lot_rows, list(tibble(
+      Outcome = "PFS", Comparison = "1L vs >=2L (inferred LOT)",
+      N = nrow(pfs_lot_d), P_value = p_lot, P_report = fmt_p(p_lot))))
+  }
+}
+if (length(lot_rows) > 0) {
+  save_csv(bind_rows(lot_rows), "O2_11_LogRank_by_LOT.csv")
+  message("    Log-rank p by inferred LOT: ")
+  print(bind_rows(lot_rows))
+}
+
 # --- 5.2 KM slide table by recorded TKI group (panel comments ii & iii) -----------------
 km_slide_table <- function(d, endpoint_label, time_label) {
   d <- d[!is.na(d$TKI_Group), , drop = FALSE]
@@ -1344,6 +1455,9 @@ if ("Age_group" %in% names(d_grp)) {
 if ("BCR_monitored" %in% names(d_grp)) {
   cat_specs[["BCR-ABL monitoring done"]] <- list(src = "BCR_monitored", kind = "factor")
 }
+if ("LOT" %in% names(d_grp)) {
+  cat_specs[["Line of therapy (inferred)"]] <- list(src = "LOT", kind = "factor")
+}
 
 fmt_group <- function(x, kind) {
   if (kind == "flag") fmt_pct(x) else fmt_factor_dist(x)
@@ -1379,10 +1493,18 @@ if (length(t1_rows) > 0) {
 }
 
 # --- Cox models (OS and PFS) ------------------------------------------------------------
+# Panel comment (xi): Grade 3+ ADR status is FORCED into the multivariable
+# models (kept even if its univariable p >= 0.20); line of therapy is forced
+# in as well (panel comment x).
+force_vars <- intersect(c("flag_ADR_sev", "LOT"), names(os_data))
 cox_os <- NULL
 cox_pfs <- NULL
-if (have_os && nrow(os_data) >= 10) cox_os <- run_cox_models(os_data)
-if (have_pfs && nrow(pfs_data) >= 10) cox_pfs <- run_cox_models(pfs_data)
+if (have_os && nrow(os_data) >= 10) {
+  cox_os <- run_cox_models(os_data, force_vars = intersect(force_vars, names(os_data)))
+}
+if (have_pfs && nrow(pfs_data) >= 10) {
+  cox_pfs <- run_cox_models(pfs_data, force_vars = intersect(force_vars, names(pfs_data)))
+}
 
 o3_univ <- tibble()
 if (!is.null(cox_os) && nrow(cox_os$univ) > 0) {
@@ -1392,6 +1514,23 @@ if (!is.null(cox_pfs) && nrow(cox_pfs$univ) > 0) {
   o3_univ <- bind_rows(o3_univ, cox_pfs$univ %>% mutate(Outcome = "PFS", .before = 1))
 }
 if (nrow(o3_univ) > 0) save_csv(o3_univ, "O3_01_Univariate_Cox.csv")
+
+# --- Univariable effect of Grade 3+ ADRs on OS and PFS (panel comment xi) --------------
+adr_univ_out <- tibble()
+for (ep in c("OS", "PFS")) {
+  cx <- if (ep == "OS") cox_os else cox_pfs
+  if (!is.null(cx) && nrow(cx$univ) > 0) {
+    r <- cx$univ %>% filter(Covariate == "flag_ADR_sev")
+    if (nrow(r) > 0) {
+      adr_univ_out <- bind_rows(adr_univ_out, r %>% mutate(Outcome = ep, .before = 1))
+    }
+  }
+}
+if (nrow(adr_univ_out) > 0) {
+  save_csv(adr_univ_out, "O3_08_Grade3plus_ADR_OS_PFS_Univariate.csv")
+  message(">>> Univariable effect of Grade 3+ ADR on OS and PFS (panel comment xi):\n")
+  print(adr_univ_out)
+}
 
 if (!is.null(cox_os) && nrow(cox_os$multiv) > 0) {
   save_csv(cox_os$multiv, "O3_02_Multivariate_Cox_OS.csv")
@@ -1424,16 +1563,17 @@ if (!is.null(cox_os) && !is.null(cox_os$cox_fit)) {
 
 # --- Cox variable table with coding and rationale (panel comment vi) --------------------
 cox_var_info <- tibble(
-  Variable = c("Phase_group", "Age_group", "Sex", "TKI_Group", "flag_T315I",
+  Variable = c("Phase_group", "Age_group", "Sex", "TKI_Group", "LOT", "flag_T315I",
                "flag_ADR_any", "flag_ADR_sev", "flag_Progression", "flag_Relapse",
                "flag_Comorbidity", "BCR_monitored", "mod_switch"),
-  Type = c("Categorical", "Categorical", "Binary", "Categorical", "Binary",
+  Type = c("Categorical", "Categorical", "Binary", "Categorical", "Binary", "Binary",
            "Binary", "Binary", "Binary", "Binary", "Binary", "Binary", "Binary"),
   Coding = c(
     "Chronic (ref) / Accelerated / Blast",
     "<40 (ref) / 40-59 / >=60 years",
     "Female (ref) / Male",
     "1G imatinib (ref) / 2G / 3G - recorded TKI group",
+    "1L imatinib (ref) / >=2L subsequent line (inferred from recorded TKI)",
     "No/other (ref) / Yes",
     "No/other (ref) / Yes",
     "No/other (ref) / Yes",
@@ -1447,9 +1587,10 @@ cox_var_info <- tibble(
     "Established prognostic factor in CML (EUTOS score)",
     "Demographic confounder",
     "Primary exposure: TKI group (confounding by indication expected)",
+    "Line of therapy: later lines follow earlier-TKI failure - confounding by indication expected; forced into model (panel x)",
     "T315I confers resistance to all TKIs except ponatinib",
     "Toxicity/intolerance may drive modification and mortality",
-    "Severe toxicity may affect survival",
+    "Severe toxicity may affect survival; forced into model (panel xi)",
     "Disease course marker (progression)",
     "Relapse indicates treatment failure",
     "Comorbidity may affect treatment tolerance and mortality",
@@ -1744,6 +1885,22 @@ if (!is.null(colmap$t315i)) {
   cat("the only mutation captured; other BCR-ABL1 mutations could not be assessed.\n\n")
 }
 
+if ("LOT" %in% names(df)) {
+  n_1l <- sum(df$LOT == "1L (imatinib)", na.rm = TRUE)
+  n_ge2l <- sum(df$LOT == ">=2L (subsequent line)", na.rm = TRUE)
+  n_lot <- max(1, n_1l + n_ge2l)
+  cat("Line of therapy (panel comment x):\n")
+  cat(paste0("Patients were categorised by inferred line of therapy: ", n_1l,
+             " (", round(100 * n_1l / n_lot, 1),
+             "%) on 1L (imatinib) and ", n_ge2l,
+             " (", round(100 * n_ge2l / n_lot, 1),
+             "%) on a subsequent line (2G/3G TKI recorded, prior imatinib presumed).\n"))
+  cat("Categorisation: O1_14a_LOT_Categorisation.csv; subsequent-line breakdown:\n")
+  cat("O1_14b_LOT_Subsequent_Line_Breakdown.csv; log-rank p-values: O2_11_LogRank_by_LOT.csv.\n")
+  cat("LOT is inferred from the recorded current TKI - it is NOT a verified dated\n")
+  cat("treatment sequence, and later-line outcomes are confounded by indication.\n\n")
+}
+
 # --- Objective 2 (survival) -----------------------------------------------------------
 cat("OBJECTIVE 2 - FIVE-YEAR OVERALL AND PROGRESSION-FREE SURVIVAL\n\n")
 
@@ -1819,6 +1976,16 @@ if (is.null(cox_os) && is.null(cox_pfs)) {
   cat("Cox models could not be performed (time-to-event data not found).\n\n")
 }
 
+if (nrow(adr_univ_out) > 0) {
+  cat("Univariable effect of Grade 3+ ADR on survival (panel comment xi):\n")
+  for (i in seq_len(nrow(adr_univ_out))) {
+    cat("   - ", adr_univ_out$Outcome[i], ": ", adr_univ_out$Report[i], "\n", sep = "")
+  }
+  cat("Grade 3+ ADR status (yes/no) was also FORCED into the multivariable OS and PFS\n")
+  cat("models above (retained even if its univariable p >= 0.20); line of therapy was\n")
+  cat("forced in as well (panel comment x).\n\n")
+}
+
 # --- Objective 4 (ADRs) -------------------------------------------------------------------
 cat("OBJECTIVE 4 - ADR PREVALENCE (panel comments iv & ix)\n\n")
 if (!has_adr_any) {
@@ -1850,6 +2017,11 @@ cat("CAVEATS FOR THE DISCUSSION\n")
 cat("---------------------------------------------------------------------\n")
 cat("- The 1G/2G/3G labels are RECORDED TKI GROUPS, not verified treatment\n")
 cat("  lines; they must not be presented as a confirmed treatment flow.\n")
+cat("- Line of therapy was INFERRED from the recorded current TKI: imatinib\n")
+cat("  = 1L; any 2G/3G TKI = subsequent line with prior imatinib presumed\n")
+cat("  (patients on 2G/3G TKIs are essentially all imatinib-exposed). Worse\n")
+cat("  outcomes on later lines reflect confounding by indication, not drug\n")
+cat("  inferiority.\n")
 cat("- A blank modification field means no modification was recorded, not\n")
 cat("  that the patient never switched; verify the 'Dose switch' code against\n")
 cat("  the study codebook before interpreting it as a TKI change.\n")
