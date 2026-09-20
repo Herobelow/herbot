@@ -565,6 +565,13 @@ if (is.null(csv_path)) {
   }
 }
 
+# Guard: this script reads CSV files, not Excel workbooks.
+if (tolower(tools::file_ext(csv_path)) %in% c("xlsx", "xls")) {
+  stop("The selected file is an Excel workbook (", basename(csv_path), ").\n",
+       "This script reads CSV files. In Excel use File > Save As > CSV (comma\n",
+       "delimited) (.csv), then select that .csv file in the dialog.")
+}
+
 message("\n>>> Loading data from: ", normalizePath(csv_path))
 
 df <- tryCatch(
@@ -579,6 +586,15 @@ df <- tryCatch(
 
 names(df) <- trimws(names(df))
 message(">>> Loaded ", nrow(df), " rows x ", ncol(df), " columns.")
+
+# Guard: the CML data file is wide (dozens of variables). A 1- or 2-column
+# load almost always means the wrong file was selected (e.g. an exported
+# Excel/zip part) or the file has no proper header row.
+if (ncol(df) < 5 || nrow(df) < 5) {
+  stop("Loaded file has ", nrow(df), " row(s) x ", ncol(df),
+       " column(s) - it does not look like the CML dataset.\n",
+       "Check that you selected the correct .csv file with a header row.")
+}
 
 if (!"Study_ID" %in% names(df) && "Study ID" %in% names(df)) {
   df <- df %>% rename(Study_ID = `Study ID`)
@@ -633,7 +649,7 @@ colmap <- list(
                          patterns = c("Comorbid")),
   bcr_mon     = find_col(df, c("BCR_ABL_Monitoring", "BCR-ABL Monitoring",
                                "BCR ABL Monitoring", "BCR_ABL_Monitoring_Done"),
-                         patterns = c("BCR[_- ]?ABL[_ ]?Monitoring|^BCR[_ ]?Monitoring")),
+                         patterns = c("BCR[-_ ]?ABL[_ ]?Monitoring|^BCR[_ ]?Monitoring")),
   modif       = find_col(df, c("TKI_Treatment_Modification", "TKI Treatment Modification"),
                          patterns = c("Treatment[_ ]?Modification", "^Modification")),
   reason      = find_col(df, c("TKI_Modification_Reason", "TKI Modification Reason"),
@@ -689,9 +705,9 @@ df$TKI_Group <- factor(
   ),
   levels = c("1G", "2G", "3G")
 )
-df_groups <- df %>% filter(!is.na(TKI_Group))
-message(">>> Patients with a classifiable recorded TKI group: ", nrow(df_groups),
-        " of ", nrow(df))
+# NOTE: the per-line data set (df_groups) is built at the END of this section,
+# after ALL derived columns (blast_tx_*, seq_inferred, ...) exist, so the
+# snapshot used by every later section is complete.
 
 group_desc <- c("1G" = "imatinib",
                 "2G" = "dasatinib / nilotinib / bosutinib",
@@ -852,6 +868,11 @@ df$seq_inferred <- mapply(function(other, tki) {
 idx3 <- which(!is.na(df$TKI_Group) & df$TKI_Group == "3G" & is.na(df$seq_inferred))
 df$seq_inferred[idx3] <- "prior TKI(s) -> ponatinib"
 
+# --- group data set (AFTER all derived columns exist) -----------------------------
+df_groups <- df %>% filter(!is.na(TKI_Group))
+message(">>> Patients with a classifiable recorded TKI group: ", nrow(df_groups),
+        " of ", nrow(df))
+
 # --- analysis data sets (complete cases for each endpoint) -----------------------------
 extra_cols <- intersect(
   c("Study_ID", "tki_clean", "TKI_Group", "Age_num", "Age_group", "Sex",
@@ -861,18 +882,23 @@ extra_cols <- intersect(
   names(df)
 )
 
+# NB: use select() + rename(), NOT transmute(all_of(...)) - a bare all_of()
+# inside transmute() is not a column selector and fails with "must be size n
+# or 1". select() is the correct context for tidyselect helpers.
 os_data <- NULL
 if (have_os) {
   os_data <- df %>%
     filter(!is.na(OS_Time), !is.na(OS_Status), OS_Time >= 0, OS_Status %in% 0:1) %>%
-    transmute(Time = OS_Time, Event = OS_Status, all_of(extra_cols))
+    select(all_of(c("OS_Time", "OS_Status", extra_cols))) %>%
+    rename(Time = OS_Time, Event = OS_Status)
 }
 
 pfs_data <- NULL
 if (have_pfs) {
   pfs_data <- df %>%
     filter(!is.na(PFS_Time), !is.na(PFS_Event), PFS_Time >= 0, PFS_Event %in% 0:1) %>%
-    transmute(Time = PFS_Time, Event = PFS_Event, all_of(extra_cols))
+    select(all_of(c("PFS_Time", "PFS_Event", extra_cols))) %>%
+    rename(Time = PFS_Time, Event = PFS_Event)
 }
 
 message("\n>>> Data quality:")
