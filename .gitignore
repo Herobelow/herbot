@@ -1,0 +1,6 @@
+# Regenerable analysis outputs (run analysis_2group.py to recreate)
+output/
+__pycache__/
+*.pyc
+.Rhistory
+.RData

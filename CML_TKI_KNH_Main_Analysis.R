@@ -36,11 +36,24 @@
 #   (vii)  Reordering of objectives                -> overall file structure
 #   (viii) Sequential TKI use                      -> Section 4.5  (O1_08/09)
 #   (ix)   ADR distribution by individual drug     -> Section 7.3  (O4_05)
-#   (x)    Line of therapy (1L vs subsequent)      -> Section 4.5b (O1_14) +
-#                                                    5.1b (O2_09..11) + Cox
+#   (x)    Line of therapy (1L vs subsequent)      -> now the PRIMARY grouping
+#                                                    everywhere (Sections 4-7)
 #   (xi)   Grade 3+ ADRs -> OS/PFS: univariable
 #                            + forced into the multivariable model
 #                                                    -> Section 6 (O3_08)
+#
+#  REGROUPING DECISION (supervisor feedback, trial 5):
+#   * The 2nd-generation TKIs (dasatinib / nilotinib / bosutinib) are ALWAYS
+#     analysed TOGETHER - separate cells are too small.
+#   * The PRIMARY comparison is TWO GROUPS ONLY:
+#       FIRST LINE      = recorded imatinib
+#       SUBSEQUENT LINE = recorded 2G TKI or ponatinib (2G+3G pooled)
+#     because only 5 patients were recorded on ponatinib - far too few for a
+#     meaningful separate ("3G") analysis. Ponatinib patients remain described
+#     individually in O1_10 (descriptive only, never compared).
+#   * Generation (1G/2G/3G) is retained as a DESCRIPTIVE label only (drug
+#     distribution, per-drug ADR profiles); it is no longer used as a
+#     comparative grouping in any inferential table, KM curve or Cox model.
 #
 #  IMPORTANT - DATA LIMITATIONS (state in the thesis):
 #   * The dataset records only the CURRENT/primary TKI per patient (a single
@@ -310,19 +323,20 @@ outcome_summary <- function(fit, d, label) {
   )
 }
 
-# KM estimate at min(60, max follow-up), one row per recorded TKI group.
-km_by_group <- function(d, label) {
-  d <- d[!is.na(d$TKI_Group), , drop = FALSE]
+# KM estimate at min(60, max follow-up), one row per group (gvar = grouping
+# column; the primary analysis passes gvar = "LOT").
+km_by_group <- function(d, label, gvar = "LOT") {
+  d <- d[!is.na(d[[gvar]]), , drop = FALSE]
   if (nrow(d) == 0) return(NULL)
   t_rep <- min(T_FIVE_YEARS, max(d$Time))
   rows <- list()
-  for (g in levels(droplevels(d$TKI_Group))) {
-    dg <- d[d$TKI_Group == g, , drop = FALSE]
+  for (g in levels(droplevels(d[[gvar]]))) {
+    dg <- d[d[[gvar]] == g, , drop = FALSE]
     if (nrow(dg) == 0) next
     est <- km_estimate_at(survfit(Surv(Time, Event) ~ 1, data = dg), t_rep)
     rows[[g]] <- tibble(
       Outcome = label,
-      TKI_Group = g,
+      Group = g,
       N = nrow(dg),
       Events = sum(dg$Event),
       Estimate_at_months = t_rep,
@@ -402,7 +416,10 @@ class_signal <- function(adr_type) {
 # covariates. Returns univ / multiv / zph tables, the fitted model, and the
 # number of events and covariates used (for EPV reporting).
 run_cox_models <- function(data, force_vars = character(0)) {
-  candidate_names <- c("Phase_group", "Age_group", "Sex", "TKI_Group", "LOT",
+  # NOTE (regrouping): TKI_Group (1G/2G/3G) is NOT a Cox covariate any more -
+  # it is collinear with LOT and the 3G cell (ponatinib, n=5) is too small.
+  # LOT (first line vs subsequent line) is the primary exposure.
+  candidate_names <- c("Phase_group", "Age_group", "Sex", "LOT",
                        "flag_T315I", "flag_ADR_any", "flag_ADR_sev",
                        "flag_Progression", "flag_Relapse", "flag_Comorbidity",
                        "BCR_monitored", "mod_switch")
@@ -410,8 +427,7 @@ run_cox_models <- function(data, force_vars = character(0)) {
     Phase_group      = "CML phase (recorded)",
     Age_group        = "Age group (<40 / 40-59 / >=60 years)",
     Sex              = "Sex",
-    TKI_Group        = "Recorded TKI group (1G/2G/3G)",
-    LOT              = "Line of therapy (1L imatinib vs >=2L subsequent, inferred)",
+    LOT              = "Line of therapy (first line imatinib vs subsequent line, inferred)",
     flag_T315I       = "T315I mutation",
     flag_ADR_any     = "Any ADR",
     flag_ADR_sev     = "Grade 3+ ADR",
@@ -812,11 +828,13 @@ if (!is.null(colmap$phase)) {
 if (!is.null(colmap$bcr_mon)) {
   b <- tolower(str_trim(as.character(df[[colmap$bcr_mon]])))
   b[is.na(b) | b == ""] <- NA_character_
+  # Any recorded result - including numeric BCR-ABL transcript values such as
+  # "0.1", "22", "34%" - proves monitoring was done; only explicit negatives
+  # ("not done" / "not documented") mean No. (Earlier versions left numeric
+  # results as NA, which wrongly dropped this covariate from the models.)
   df$BCR_monitored <- factor(
-    ifelse(b %in% c("not done", "not documented", "no", "0"), "No",
-           ifelse(b %in% c("yes", "1", "done", "completed") |
-                    grepl("mmr|dmr|major|complete|optimal|deep|mr[0-9]", b), "Yes",
-                  NA_character_)),
+    ifelse(b %in% c("not done", "not documented", "no", "0", "none"), "No",
+           ifelse(is.na(b), NA_character_, "Yes")),
     levels = c("No", "Yes")
   )
 } else {
@@ -897,15 +915,15 @@ df$seq_inferred[idx3] <- "prior TKI(s) -> ponatinib"
 # recorded current TKI alone).
 df$LOT <- factor(
   case_when(
-    df$TKI_Group == "1G" ~ "1L (imatinib)",
-    df$TKI_Group %in% c("2G", "3G") ~ ">=2L (subsequent line)",
+    df$TKI_Group == "1G" ~ "First line (imatinib)",
+    df$TKI_Group %in% c("2G", "3G") ~ "Subsequent line (2G/3G TKI)",
     TRUE ~ NA_character_
   ),
-  levels = c("1L (imatinib)", ">=2L (subsequent line)")
+  levels = c("First line (imatinib)", "Subsequent line (2G/3G TKI)")
 )
 message(">>> Inferred line of therapy: ",
-        sum(df$LOT == "1L (imatinib)", na.rm = TRUE), " on 1L (imatinib) | ",
-        sum(df$LOT == ">=2L (subsequent line)", na.rm = TRUE),
+        sum(df$LOT == "First line (imatinib)", na.rm = TRUE), " on first line (imatinib) | ",
+        sum(df$LOT == "Subsequent line (2G/3G TKI)", na.rm = TRUE),
         " on subsequent line(s) [2G/3G TKI recorded - prior imatinib presumed].")
 
 # --- group data set (AFTER all derived columns exist) -----------------------------
@@ -994,22 +1012,22 @@ o1_01 <- df_groups %>%
 save_csv(o1_01, "O1_01_TKI_Group_Distribution.csv")
 print(o1_01)
 
-# --- 4.2 Phase distribution by recorded TKI group (panel comment ii) -------------
+# --- 4.2 Phase distribution by line group (primary; explains confounding) ------
 if (!is.null(colmap$phase)) {
   o1_02 <- df_groups %>%
     filter(!is.na(Phase_group)) %>%
-    count(TKI_Group, Phase_group, name = "n") %>%
-    group_by(TKI_Group) %>%
+    count(LOT, Phase_group, name = "n") %>%
+    group_by(LOT) %>%
     mutate(Pct_of_group = round(100 * n / sum(n), 1)) %>%
     ungroup()
   p_phase_grp <- cat_pvalue(
-    table(df_groups$TKI_Group, df_groups$Phase_group, useNA = "no"))
+    table(df_groups$LOT, df_groups$Phase_group, useNA = "no"))
   o1_02_p <- tibble(
-    Test = "Phase of CML vs recorded TKI group",
+    Test = "Phase of CML vs line group (first line vs subsequent)",
     P_value = p_phase_grp,
     P_report = fmt_p(p_phase_grp))
-  save_csv(o1_02, "O1_02_Phase_by_TKI_Group.csv")
-  save_csv(o1_02_p, "O1_02_Phase_by_TKI_Group_pvalue.csv")
+  save_csv(o1_02, "O1_02_Phase_by_Line_Group.csv")
+  save_csv(o1_02_p, "O1_02_Phase_by_Line_Group_pvalue.csv")
   print(o1_02)
   print(o1_02_p)
 } else {
@@ -1018,18 +1036,18 @@ if (!is.null(colmap$phase)) {
 
 # --- 4.3 Documented treatment modifications by group ------------------------------
 o1_03 <- df_groups %>%
-  count(TKI_Group, name = "n") %>%
+  count(LOT, name = "n") %>%
   left_join(
     df_groups %>%
-      group_by(TKI_Group) %>%
+      group_by(LOT) %>%
       summarise(n_switch = sum(mod_switch),
                 n_interruption = sum(mod_interruption),
                 n_dose_reduction = sum(mod_dose_reduction),
                 n_any_mod = sum(any_modification),
                 .groups = "drop"),
-    by = "TKI_Group") %>%
+    by = "LOT") %>%
   mutate(Pct_any_mod = round(100 * n_any_mod / n, 1))
-save_csv(o1_03, "O1_03_Treatment_Modifications_by_Group.csv")
+save_csv(o1_03, "O1_03_Treatment_Modifications_by_Line_Group.csv")
 print(o1_03)
 
 # --- 4.4 Documented flow within each recorded group (each group = 100%) -----------
@@ -1049,16 +1067,16 @@ df_flow <- df_groups %>%
       "Died without recorded switch")))
 
 o1_04 <- df_flow %>%
-  count(TKI_Group, Flow_group, name = "n") %>%
-  group_by(TKI_Group) %>%
+  count(LOT, Flow_group, name = "n") %>%
+  group_by(LOT) %>%
   mutate(Percent_of_group = round(100 * n / sum(n), 1)) %>%
   ungroup()
-save_csv(o1_04, "O1_04_Documented_Flow_by_Group.csv")
+save_csv(o1_04, "O1_04_Documented_Flow_by_Line_Group.csv")
 print(o1_04)
 
 o1_05 <- df_flow %>%
   filter(mod_switch) %>%
-  group_by(TKI_Group) %>%
+  group_by(LOT) %>%
   summarise(
     Switchers = n(),
     Died_after_switch = sum(died, na.rm = TRUE),
@@ -1080,11 +1098,11 @@ print(o1_06)
 if (!is.null(colmap$reason)) {
   o1_07 <- df_flow %>%
     filter(!is.na(reason_txt), reason_txt != "") %>%
-    count(TKI_Group, Reason = reason_txt, name = "n") %>%
-    group_by(TKI_Group) %>%
+    count(LOT, Reason = reason_txt, name = "n") %>%
+    group_by(LOT) %>%
     mutate(Percent_of_group = round(100 * n / sum(n), 1)) %>%
     ungroup()
-  save_csv(o1_07, "O1_07_Modification_Reasons_by_Group.csv")
+  save_csv(o1_07, "O1_07_Modification_Reasons_by_Line_Group.csv")
   print(o1_07)
 }
 
@@ -1132,7 +1150,7 @@ lot_tab <- df_groups %>%
   mutate(Percent_of_classifiable = round(100 * n / nrow(df_groups), 1))
 
 lot_breakdown <- df_groups %>%
-  filter(LOT == ">=2L (subsequent line)") %>%
+  filter(LOT == "Subsequent line (2G/3G TKI)") %>%
   count(TKI_Group, tki_clean, name = "n", sort = TRUE) %>%
   mutate(Percent_of_subsequent_line = round(100 * n / sum(n), 1)) %>%
   rename(recorded_TKI = tki_clean)
@@ -1225,23 +1243,23 @@ if (have_os && nrow(os_data) >= 5) {
   )
   save_fig(p_os, "O2_01_KM_OS_Overall.png")
 
-  os_grp_d <- os_data %>% filter(!is.na(TKI_Group))
-  if (nrow(os_grp_d) >= 5 && length(unique(os_grp_d$TKI_Group)) >= 2) {
-    fit_os_grp <- survfit(Surv(Time, Event) ~ TKI_Group, data = os_grp_d)
-    present <- levels(droplevels(os_grp_d$TKI_Group))
-    grp_labs <- c("1G" = "1G (Imatinib)",
-                  "2G" = "2G (Dasatinib/Nilotinib/Bosutinib)",
-                  "3G" = "3G (Ponatinib)")
+  # PRIMARY comparison (regrouping decision): two groups, first line vs
+  # subsequent line. Generation (1G/2G/3G) is NOT used for inferential
+  # comparisons (ponatinib n=5 - too small for a meaningful 3G group).
+  os_grp_d <- os_data %>% filter(!is.na(LOT))
+  if (nrow(os_grp_d) >= 5 && length(unique(os_grp_d$LOT)) >= 2) {
+    fit_os_grp <- survfit(Surv(Time, Event) ~ LOT, data = os_grp_d)
     p_os_grp <- ggsurvplot(
       fit_os_grp, data = os_grp_d,
       pval = TRUE, conf.int = TRUE, risk.table = TRUE, risk.table.height = 0.2,
-      legend.labs = grp_labs[present],
-      title = "Overall survival by recorded TKI group",
-      subtitle = "Recorded TKI group, not a verified treatment line",
+      legend.labs = c("First line (imatinib)" = "First line (imatinib)",
+                      "Subsequent line (2G/3G TKI)" = "Subsequent line (2G/3G TKI)"),
+      title = "Overall survival by line of therapy (PRIMARY analysis)",
+      subtitle = "Inferred LOT: subsequent line = recorded 2G/3G TKI (prior imatinib presumed)",
       xlab = "Follow-up (months)", ylab = "Probability of survival",
       print = FALSE
     )
-    save_fig(p_os_grp, "O2_02_KM_OS_by_TKI_Group.png")
+    save_fig(p_os_grp, "O2_02_KM_OS_by_Line_Group.png")
   }
 } else {
   message("    Skipped OS analysis (insufficient OS data).")
@@ -1263,87 +1281,63 @@ if (have_pfs && nrow(pfs_data) >= 5) {
   )
   save_fig(p_pfs, "O2_03_KM_PFS_Overall.png")
 
-  pfs_grp_d <- pfs_data %>% filter(!is.na(TKI_Group))
-  if (nrow(pfs_grp_d) >= 5 && length(unique(pfs_grp_d$TKI_Group)) >= 2) {
-    fit_pfs_grp <- survfit(Surv(Time, Event) ~ TKI_Group, data = pfs_grp_d)
-    present <- levels(droplevels(pfs_grp_d$TKI_Group))
-    grp_labs <- c("1G" = "1G (Imatinib)",
-                  "2G" = "2G (Dasatinib/Nilotinib/Bosutinib)",
-                  "3G" = "3G (Ponatinib)")
+  pfs_grp_d <- pfs_data %>% filter(!is.na(LOT))
+  if (nrow(pfs_grp_d) >= 5 && length(unique(pfs_grp_d$LOT)) >= 2) {
+    fit_pfs_grp <- survfit(Surv(Time, Event) ~ LOT, data = pfs_grp_d)
     p_pfs_grp <- ggsurvplot(
       fit_pfs_grp, data = pfs_grp_d,
       pval = TRUE, conf.int = TRUE, risk.table = TRUE, risk.table.height = 0.2,
-      legend.labs = grp_labs[present],
-      title = "Progression-free survival by recorded TKI group",
-      subtitle = "Recorded TKI group, not a verified treatment line",
+      legend.labs = c("First line (imatinib)" = "First line (imatinib)",
+                      "Subsequent line (2G/3G TKI)" = "Subsequent line (2G/3G TKI)"),
+      title = "Progression-free survival by line of therapy (PRIMARY analysis)",
+      subtitle = "Inferred LOT: subsequent line = recorded 2G/3G TKI (prior imatinib presumed)",
       xlab = "Follow-up (months)", ylab = "Probability of being progression-free",
       print = FALSE
     )
-    save_fig(p_pfs_grp, "O2_04_KM_PFS_by_TKI_Group.png")
+    save_fig(p_pfs_grp, "O2_04_KM_PFS_by_Line_Group.png")
   }
 } else {
   message("    Skipped PFS analysis (insufficient PFS data).")
 }
 
-# --- 5.1b KM by inferred line of therapy: 1L vs >=2L (panel comment x) ------------------
+# --- 5.1b Log-rank for the PRIMARY two-group comparison (first line vs subsequent) ---
+# (KM figures for this comparison are produced above as O2_02 / O2_04; the
+#  generation-based KM was retired as an inferential comparison because the
+#  3G/ponatinib cell has only 5 patients.)
 lot_rows <- list()
 if (have_os && "LOT" %in% names(os_data)) {
   os_lot_d <- os_data %>% filter(!is.na(LOT))
   if (nrow(os_lot_d) >= 5 && length(unique(os_lot_d$LOT)) >= 2) {
-    fit_os_lot <- survfit(Surv(Time, Event) ~ LOT, data = os_lot_d)
-    p_os_lot <- ggsurvplot(
-      fit_os_lot, data = os_lot_d,
-      pval = TRUE, conf.int = TRUE, risk.table = TRUE, risk.table.height = 0.2,
-      legend.labs = c("1L (imatinib)" = "1L (imatinib)",
-                      ">=2L (subsequent line)" = "Subsequent line (>=2L)"),
-      title = "Overall survival by line of therapy (inferred)",
-      subtitle = "1L = recorded imatinib; >=2L = recorded 2G/3G TKI (prior imatinib presumed)",
-      xlab = "Follow-up (months)", ylab = "Probability of survival",
-      print = FALSE
-    )
-    save_fig(p_os_lot, "O2_09_KM_OS_by_LOT.png")
     p_lot <- logrank_p(os_lot_d, "LOT")
     lot_rows <- c(lot_rows, list(tibble(
-      Outcome = "OS", Comparison = "1L vs >=2L (inferred LOT)",
+      Outcome = "OS", Comparison = "First line vs subsequent line (primary)",
       N = nrow(os_lot_d), P_value = p_lot, P_report = fmt_p(p_lot))))
   }
 }
 if (have_pfs && "LOT" %in% names(pfs_data)) {
   pfs_lot_d <- pfs_data %>% filter(!is.na(LOT))
   if (nrow(pfs_lot_d) >= 5 && length(unique(pfs_lot_d$LOT)) >= 2) {
-    fit_pfs_lot <- survfit(Surv(Time, Event) ~ LOT, data = pfs_lot_d)
-    p_pfs_lot <- ggsurvplot(
-      fit_pfs_lot, data = pfs_lot_d,
-      pval = TRUE, conf.int = TRUE, risk.table = TRUE, risk.table.height = 0.2,
-      legend.labs = c("1L (imatinib)" = "1L (imatinib)",
-                      ">=2L (subsequent line)" = "Subsequent line (>=2L)"),
-      title = "Progression-free survival by line of therapy (inferred)",
-      subtitle = "1L = recorded imatinib; >=2L = recorded 2G/3G TKI (prior imatinib presumed)",
-      xlab = "Follow-up (months)", ylab = "Probability of being progression-free",
-      print = FALSE
-    )
-    save_fig(p_pfs_lot, "O2_10_KM_PFS_by_LOT.png")
     p_lot <- logrank_p(pfs_lot_d, "LOT")
     lot_rows <- c(lot_rows, list(tibble(
-      Outcome = "PFS", Comparison = "1L vs >=2L (inferred LOT)",
+      Outcome = "PFS", Comparison = "First line vs subsequent line (primary)",
       N = nrow(pfs_lot_d), P_value = p_lot, P_report = fmt_p(p_lot))))
   }
 }
 if (length(lot_rows) > 0) {
   save_csv(bind_rows(lot_rows), "O2_11_LogRank_by_LOT.csv")
-  message("    Log-rank p by inferred LOT: ")
+  message("    Log-rank p for the primary two-group comparison: ")
   print(bind_rows(lot_rows))
 }
 
 # --- 5.2 KM slide table by recorded TKI group (panel comments ii & iii) -----------------
-km_slide_table <- function(d, endpoint_label, time_label) {
-  d <- d[!is.na(d$TKI_Group), , drop = FALSE]
-  if (nrow(d) < 5 || length(unique(d$TKI_Group)) < 2) return(NULL)
-  grps <- levels(droplevels(d$TKI_Group))
+km_slide_table <- function(d, endpoint_label, time_label, gvar = "LOT") {
+  d <- d[!is.na(d[[gvar]]), , drop = FALSE]
+  if (nrow(d) < 5 || length(unique(d[[gvar]])) < 2) return(NULL)
+  grps <- levels(droplevels(d[[gvar]]))
   tmax <- max(d$Time)
 
   gvals <- sapply(grps, function(g) {
-    dg <- d[d$TKI_Group == g, , drop = FALSE]
+    dg <- d[d[[gvar]] == g, , drop = FALSE]
     list(n = nrow(dg),
          events = sum(dg$Event),
          med = km_median(survfit(Surv(Time, Event) ~ 1, data = dg)),
@@ -1364,7 +1358,7 @@ km_slide_table <- function(d, endpoint_label, time_label) {
                  sprintf("n/a (max FU %.0f mo)", tmax)
                else sprintf("%.1f", 100 * x$y5))
 
-  p <- logrank_p(d, "TKI_Group")
+  p <- logrank_p(d, gvar)
 
   out <- data.frame(
     Parameter = c(paste0("N (", endpoint_label, ")"),
@@ -1381,10 +1375,10 @@ km_slide_table <- function(d, endpoint_label, time_label) {
 }
 
 if (have_os && nrow(os_data) >= 5) {
-  o2_slide <- km_slide_table(os_data, "OS", "OS")
+  o2_slide <- km_slide_table(os_data, "OS", "OS", gvar = "LOT")
   if (!is.null(o2_slide)) {
-    save_csv(o2_slide, "O2_05_KM_by_TKI_Group_Slide_Table.csv")
-    message("    Panel comments (ii)/(iii): KM slide table by TKI group:\n")
+    save_csv(o2_slide, "O2_05_KM_by_Line_Group_Slide_Table.csv")
+    message("    Primary two-group KM slide table (first line vs subsequent):\n")
     print(o2_slide)
   }
 }
@@ -1402,22 +1396,22 @@ if (have_pfs && nrow(pfs_data) >= 5) {
   t <- km_by_group(pfs_data, "PFS")
   if (!is.null(t)) o2_grp_parts <- c(o2_grp_parts, list(t))
 }
-if (length(o2_grp_parts) > 0) save_csv(bind_rows(o2_grp_parts), "O2_07_KM_5Year_by_Group.csv")
+if (length(o2_grp_parts) > 0) save_csv(bind_rows(o2_grp_parts), "O2_07_KM_5Year_by_Line_Group.csv")
 
 lr_rows <- list()
 if (have_os && nrow(os_data) >= 5) {
   lr_rows <- c(lr_rows, list(tibble(
-    Outcome = "OS", Test = "Log-rank across recorded TKI groups",
-    P_value = logrank_p(os_data, "TKI_Group"),
-    P_report = fmt_p(logrank_p(os_data, "TKI_Group")))))
+    Outcome = "OS", Test = "Log-rank: first line vs subsequent line (primary)",
+    P_value = logrank_p(os_data, "LOT"),
+    P_report = fmt_p(logrank_p(os_data, "LOT")))))
 }
 if (have_pfs && nrow(pfs_data) >= 5) {
   lr_rows <- c(lr_rows, list(tibble(
-    Outcome = "PFS", Test = "Log-rank across recorded TKI groups",
-    P_value = logrank_p(pfs_data, "TKI_Group"),
-    P_report = fmt_p(logrank_p(pfs_data, "TKI_Group")))))
+    Outcome = "PFS", Test = "Log-rank: first line vs subsequent line (primary)",
+    P_value = logrank_p(pfs_data, "LOT"),
+    P_report = fmt_p(logrank_p(pfs_data, "LOT")))))
 }
-if (length(lr_rows) > 0) save_csv(bind_rows(lr_rows), "O2_08_LogRank_by_Group.csv")
+if (length(lr_rows) > 0) save_csv(bind_rows(lr_rows), "O2_08_LogRank_by_Line_Group.csv")
 
 # =============================================================================
 # 6. OBJECTIVE 3 - PREDICTORS OF SURVIVAL OUTCOMES
@@ -1425,9 +1419,9 @@ if (length(lr_rows) > 0) save_csv(bind_rows(lr_rows), "O2_08_LogRank_by_Group.cs
 # (panel comments v & vi: HR with 95% CI + p; full variable table; EPV control)
 message("\n>>> Objective 3: predictors of survival (Cox models)...")
 
-# --- Table 1: baseline characteristics by recorded TKI group -------------------------
+# --- Table 1: baseline characteristics by line group (PRIMARY two groups) -----------
 d_grp <- df_groups
-grp_present <- if (nrow(d_grp) > 0) levels(droplevels(d_grp$TKI_Group)) else character(0)
+grp_present <- if (nrow(d_grp) > 0) levels(droplevels(d_grp$LOT)) else character(0)
 
 num_specs <- list()
 if ("Age_num" %in% names(d_grp)) num_specs[["Age (years)"]] <- "Age_num"
@@ -1455,9 +1449,8 @@ if ("Age_group" %in% names(d_grp)) {
 if ("BCR_monitored" %in% names(d_grp)) {
   cat_specs[["BCR-ABL monitoring done"]] <- list(src = "BCR_monitored", kind = "factor")
 }
-if ("LOT" %in% names(d_grp)) {
-  cat_specs[["Line of therapy (inferred)"]] <- list(src = "LOT", kind = "factor")
-}
+# NOTE: LOT is the grouping variable for Table 1 (primary two-group design),
+# so it is no longer listed as a covariate row.
 
 fmt_group <- function(x, kind) {
   if (kind == "flag") fmt_pct(x) else fmt_factor_dist(x)
@@ -1468,9 +1461,9 @@ for (nm in names(num_specs)) {
   src <- num_specs[[nm]]
   vals <- setNames(lapply(c(grp_present, "Overall"), function(g) {
     if (g == "Overall") fmt_median_iqr(d_grp[[src]]) else
-      fmt_median_iqr(d_grp[[src]][droplevels(d_grp$TKI_Group) == g])
+      fmt_median_iqr(d_grp[[src]][droplevels(d_grp$LOT) == g])
   }), c(grp_present, "Overall"))
-  p <- pval_numeric(d_grp[[src]], droplevels(d_grp$TKI_Group))
+  p <- pval_numeric(d_grp[[src]], droplevels(d_grp$LOT))
   t1_rows[[nm]] <- as.data.frame(c(vals, list(P_value = round(p, 4), Variable = nm)),
                                  stringsAsFactors = FALSE)
 }
@@ -1478,17 +1471,17 @@ for (nm in names(cat_specs)) {
   sp <- cat_specs[[nm]]
   vals <- setNames(lapply(c(grp_present, "Overall"), function(g) {
     if (g == "Overall") fmt_group(d_grp[[sp$src]], sp$kind) else
-      fmt_group(d_grp[[sp$src]][droplevels(d_grp$TKI_Group) == g], sp$kind)
+      fmt_group(d_grp[[sp$src]][droplevels(d_grp$LOT) == g], sp$kind)
   }), c(grp_present, "Overall"))
-  p <- pval_categorical(d_grp[[sp$src]], droplevels(d_grp$TKI_Group))
+  p <- pval_categorical(d_grp[[sp$src]], droplevels(d_grp$LOT))
   t1_rows[[nm]] <- as.data.frame(c(vals, list(P_value = round(p, 4), Variable = nm)),
                                  stringsAsFactors = FALSE)
 }
 if (length(t1_rows) > 0) {
   tbl1 <- bind_rows(t1_rows)
   tbl1 <- tbl1[c("Variable", grp_present, "Overall", "P_value")]
-  save_csv(tbl1, "Table1_Baseline_Characteristics.csv")
-  message(">>> Table 1 (baseline characteristics by recorded TKI group):\n")
+  save_csv(tbl1, "Table1_Baseline_by_Line_Group.csv")
+  message(">>> Table 1 (baseline characteristics by line group, primary):\n")
   print(tbl1)
 }
 
@@ -1563,17 +1556,16 @@ if (!is.null(cox_os) && !is.null(cox_os$cox_fit)) {
 
 # --- Cox variable table with coding and rationale (panel comment vi) --------------------
 cox_var_info <- tibble(
-  Variable = c("Phase_group", "Age_group", "Sex", "TKI_Group", "LOT", "flag_T315I",
+  Variable = c("Phase_group", "Age_group", "Sex", "LOT", "flag_T315I",
                "flag_ADR_any", "flag_ADR_sev", "flag_Progression", "flag_Relapse",
                "flag_Comorbidity", "BCR_monitored", "mod_switch"),
-  Type = c("Categorical", "Categorical", "Binary", "Categorical", "Binary", "Binary",
+  Type = c("Categorical", "Categorical", "Binary", "Binary", "Binary",
            "Binary", "Binary", "Binary", "Binary", "Binary", "Binary", "Binary"),
   Coding = c(
     "Chronic (ref) / Accelerated / Blast",
     "<40 (ref) / 40-59 / >=60 years",
     "Female (ref) / Male",
-    "1G imatinib (ref) / 2G / 3G - recorded TKI group",
-    "1L imatinib (ref) / >=2L subsequent line (inferred from recorded TKI)",
+    "First line imatinib (ref) / subsequent line (inferred from recorded TKI)",
     "No/other (ref) / Yes",
     "No/other (ref) / Yes",
     "No/other (ref) / Yes",
@@ -1586,8 +1578,7 @@ cox_var_info <- tibble(
     "Strongest known prognostic factor at diagnosis",
     "Established prognostic factor in CML (EUTOS score)",
     "Demographic confounder",
-    "Primary exposure: TKI group (confounding by indication expected)",
-    "Line of therapy: later lines follow earlier-TKI failure - confounding by indication expected; forced into model (panel x)",
+    "PRIMARY exposure: line of therapy - later lines follow earlier-TKI failure, confounding by indication expected; forced into model (panel x)",
     "T315I confers resistance to all TKIs except ponatinib",
     "Toxicity/intolerance may drive modification and mortality",
     "Severe toxicity may affect survival; forced into model (panel xi)",
@@ -1732,9 +1723,9 @@ if (!has_adr_any) {
   save_csv(o4_02, "O4_02_ADR_Prevalence_by_TKI.csv")
   print(o4_02)
 
-  # --- 7.1b ADR prevalence by recorded TKI group ---------------------------------
+  # --- 7.1b ADR prevalence by line group (primary two groups) ---------------------
   o4_03 <- df_groups %>%
-    group_by(TKI_Group) %>%
+    group_by(LOT) %>%
     summarise(
       n = n(),
       n_ADR_known = sum(!is.na(flag_ADR_any)),
@@ -1746,7 +1737,7 @@ if (!has_adr_any) {
       else NA_real_,
       .groups = "drop"
     )
-  save_csv(o4_03, "O4_03_ADR_Prevalence_by_Group.csv")
+  save_csv(o4_03, "O4_03_ADR_Prevalence_by_Line_Group.csv")
   print(o4_03)
 
   # --- 7.2 Grade 3+ ADR types (panel comment iv) ----------------------------------
@@ -1844,7 +1835,7 @@ if (!has_adr_any) {
   if (!is.null(colmap$reason)) {
     sw <- df_groups %>% filter(mod_switch)
     o4_06 <- sw %>%
-      group_by(TKI_Group) %>%
+      group_by(LOT) %>%
       summarise(
         n_switch = n(),
         n_adr_reason = sum(reason_adr_related, na.rm = TRUE),
@@ -1855,14 +1846,14 @@ if (!has_adr_any) {
       )
     all_row <- sw %>%
       summarise(
-        TKI_Group = "All",
+        LOT = "All",
         n_switch = n(),
         n_adr_reason = sum(reason_adr_related, na.rm = TRUE),
         Pct_adr_reason = if (n() > 0)
           round(100 * sum(reason_adr_related, na.rm = TRUE) / n(), 1)
         else NA_real_
       )
-    o4_06 <- bind_rows(o4_06 %>% mutate(TKI_Group = as.character(TKI_Group)), all_row)
+    o4_06 <- bind_rows(o4_06 %>% mutate(LOT = as.character(LOT)), all_row)
     save_csv(o4_06, "O4_06_ADR_related_TKI_Modifications.csv")
     print(o4_06)
   }
@@ -1922,13 +1913,13 @@ if (!is.null(colmap$t315i)) {
 }
 
 if ("LOT" %in% names(df)) {
-  n_1l <- sum(df$LOT == "1L (imatinib)", na.rm = TRUE)
-  n_ge2l <- sum(df$LOT == ">=2L (subsequent line)", na.rm = TRUE)
+  n_1l <- sum(df$LOT == "First line (imatinib)", na.rm = TRUE)
+  n_ge2l <- sum(df$LOT == "Subsequent line (2G/3G TKI)", na.rm = TRUE)
   n_lot <- max(1, n_1l + n_ge2l)
   cat("Line of therapy (panel comment x):\n")
   cat(paste0("Patients were categorised by inferred line of therapy: ", n_1l,
              " (", round(100 * n_1l / n_lot, 1),
-             "%) on 1L (imatinib) and ", n_ge2l,
+             "%) on first line (imatinib) and ", n_ge2l,
              " (", round(100 * n_ge2l / n_lot, 1),
              "%) on a subsequent line (2G/3G TKI recorded, prior imatinib presumed).\n"))
   cat("Categorisation: O1_14a_LOT_Categorisation.csv; subsequent-line breakdown:\n")
@@ -1982,12 +1973,13 @@ if (!is.null(pfs_summary_tbl)) {
   }
 }
 
-cat("Generation-outcome pattern (panel comment ii):\n")
-cat("Worse survival with later recorded TKI groups is explained by confounding\n")
-cat("by indication, not drug inferiority: 2G/3G TKIs were overwhelmingly used in\n")
+cat("Line-of-therapy outcome pattern (primary two-group analysis):\n")
+cat("Worse survival on the subsequent-line group is explained by confounding by\n")
+cat("indication, not drug inferiority: 2G/3G TKIs were overwhelmingly used in\n")
 cat("patients who had already failed earlier therapy or who presented with\n")
-cat("advanced-phase disease (see O1_02_Phase_by_TKI_Group.csv), the 3G group is\n")
-cat("very small (wide CIs), and later-started patients have shorter follow-up.\n\n")
+cat("advanced-phase disease (see O1_02_Phase_by_Line_Group.csv). The 2G TKIs are\n")
+cat("analysed together and ponatinib (n=5) is pooled into the subsequent-line\n")
+cat("group, so no small separate 3G comparison is made.\n\n")
 
 # --- Objective 3 (predictors) -----------------------------------------------------------
 cat("OBJECTIVE 3 - PREDICTORS OF SURVIVAL (panel comments v & vi)\n\n")
