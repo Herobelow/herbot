@@ -415,17 +415,21 @@ class_signal <- function(adr_type) {
 # `data` must contain Time, Event and (where available) the candidate
 # covariates. Returns univ / multiv / zph tables, the fitted model, and the
 # number of events and covariates used (for EPV reporting).
-run_cox_models <- function(data, force_vars = character(0)) {
+run_cox_models <- function(data, force_vars = character(0), fixed_vars = NULL) {
   # NOTE (regrouping): TKI_Group (1G/2G/3G) is NOT a Cox covariate any more -
   # it is collinear with LOT and the 3G cell (ponatinib, n=5) is too small.
   # LOT (first line vs subsequent line) is the primary exposure.
-  candidate_names <- c("Phase_group", "Age_group", "Sex", "LOT",
+  # If fixed_vars is supplied, the multivariable model uses EXACTLY those
+  # covariates (supervisor-specified adjusted set: phase + sex + age + LOT +
+  # Grade>=3 ADR) with no stepwise selection.
+  candidate_names <- c("Phase_group", "Age_group", "Sex", "LOT", "Age_num",
                        "flag_T315I", "flag_ADR_any", "flag_ADR_sev",
                        "flag_Progression", "flag_Relapse", "flag_Comorbidity",
                        "BCR_monitored", "mod_switch")
   var_labels <- c(
     Phase_group      = "CML phase (recorded)",
     Age_group        = "Age group (<40 / 40-59 / >=60 years)",
+    Age_num          = "Age (years, continuous)",
     Sex              = "Sex",
     LOT              = "Line of therapy (first line imatinib vs subsequent line, inferred)",
     flag_T315I       = "T315I mutation",
@@ -492,27 +496,34 @@ run_cox_models <- function(data, force_vars = character(0)) {
   n_used <- NA_integer_
   n_cov_final <- 0L
   cox_fit <- NULL
-  sel <- unique(univ$Covariate[univ$p.value < VAR_ENTRY_P])
-  if (length(sel) == 0) sel <- keep
+  if (!is.null(fixed_vars)) {
+    # Supervisor-specified adjusted set: fit exactly these, no selection.
+    sel <- fixed_vars[fixed_vars %in% names(data)]
+    message("    Adjusted model uses the FIXED covariate set: ",
+            paste(sel, collapse = " + "))
+  } else {
+    sel <- unique(univ$Covariate[univ$p.value < VAR_ENTRY_P])
+    if (length(sel) == 0) sel <- keep
 
-  # Panel requirement (xi): Grade 3+ ADR status and line of therapy must
-  # appear in the multivariable model even if their univariable p >= 0.20.
-  sel <- union(sel, intersect(force_vars, keep))
+    # Panel requirement (xi): Grade 3+ ADR status and line of therapy must
+    # appear in the multivariable model even if their univariable p >= 0.20.
+    sel <- union(sel, intersect(force_vars, keep))
 
-  # EPV guard (panel comment vi): limit covariates to ~events/EPV_MIN.
-  # Forced covariates are retained; remaining slots go to the most
-  # significant univariable p-values.
-  max_cov <- max(2L, as.integer(floor(n_events / EPV_MIN)))
-  if (length(sel) > max_cov) {
-    forced <- intersect(force_vars, sel)
-    pv <- aggregate(p.value ~ Covariate, data = univ, FUN = min)
-    ranked <- pv$Covariate[order(pv$p.value, na.last = TRUE)]
-    rest <- ranked[ranked %in% setdiff(sel, forced)]
-    sel <- c(forced, head(rest, max(0L, max_cov - length(forced))))
-    message("    EPV guard: multivariable model limited to ", max_cov,
-            " covariates (events = ", n_events, "; ", EPV_MIN,
-            " events per covariate); retained forced covariates: ",
-            if (length(forced) > 0) paste(forced, collapse = ", ") else "none", ".")
+    # EPV guard (panel comment vi): limit covariates to ~events/EPV_MIN.
+    # Forced covariates are retained; remaining slots go to the most
+    # significant univariable p-values.
+    max_cov <- max(2L, as.integer(floor(n_events / EPV_MIN)))
+    if (length(sel) > max_cov) {
+      forced <- intersect(force_vars, sel)
+      pv <- aggregate(p.value ~ Covariate, data = univ, FUN = min)
+      ranked <- pv$Covariate[order(pv$p.value, na.last = TRUE)]
+      rest <- ranked[ranked %in% setdiff(sel, forced)]
+      sel <- c(forced, head(rest, max(0L, max_cov - length(forced))))
+      message("    EPV guard: multivariable model limited to ", max_cov,
+              " covariates (events = ", n_events, "; ", EPV_MIN,
+              " events per covariate); retained forced covariates: ",
+              if (length(forced) > 0) paste(forced, collapse = ", ") else "none", ".")
+    }
   }
 
   if (length(sel) >= 1) {
@@ -524,8 +535,11 @@ run_cox_models <- function(data, force_vars = character(0)) {
                            NULL
                          })
     if (!is.null(full_fit)) {
-      cox_fit <- tryCatch(step(full_fit, direction = "backward", trace = FALSE),
-                          error = function(e) full_fit)
+      # With a fixed covariate set there is no model selection; otherwise
+      # keep the AIC backward stepwise as before.
+      cox_fit <- if (!is.null(fixed_vars)) full_fit else
+        tryCatch(step(full_fit, direction = "backward", trace = FALSE),
+                 error = function(e) full_fit)
       n_used <- as.integer(summary(cox_fit)$n)
       mt <- broom::tidy(cox_fit, conf.int = TRUE, exponent = TRUE)
       if (!"HR" %in% names(mt) && "estimate" %in% names(mt)) mt$HR <- mt$estimate
@@ -965,6 +979,30 @@ message("    Classifiable recorded TKI grp: ", nrow(df_groups), " of ", nrow(df)
 if (have_os)  message("    Complete OS data:              ", nrow(os_data))
 if (have_pfs) message("    Complete PFS data:             ", nrow(pfs_data))
 
+# --- event-coding checks (Objective 3: OS event + PFS event w/ death as event) ---
+if (have_os && have_pfs) {
+  n_death   <- sum(df$OS_Status == 1, na.rm = TRUE)
+  n_os_ev   <- sum(df$OS_Status == 1, na.rm = TRUE)
+  n_pfs_ev  <- sum(df$PFS_Event == 1, na.rm = TRUE)
+  n_pfs_death <- sum(df$OS_Status == 1 & df$PFS_Event == 1, na.rm = TRUE)
+  n_death_not_pfs <- sum(df$OS_Status == 1 & df$PFS_Event != 1, na.rm = TRUE)
+  n_pfs_nondeath  <- sum(df$OS_Status != 1 & df$PFS_Event == 1, na.rm = TRUE)
+  ev_chk <- tibble(
+    Check = c("OS events (= deaths)", "PFS events (total)",
+              "PFS events that are deaths", "Deaths NOT coded as PFS event (must be 0)",
+              "Non-death PFS events (progression/relapse while alive)"),
+    n = c(n_os_ev, n_pfs_ev, n_pfs_death, n_death_not_pfs, n_pfs_nondeath))
+  save_csv(ev_chk, "O3_00_Event_Coding_Checks.csv")
+  message(">>> Event-coding checks (death must be a PFS event):")
+  print(ev_chk)
+  if (n_death_not_pfs > 0) {
+    message("    WARNING: ", n_death_not_pfs,
+            " death(s) are NOT coded as a PFS event - review PFS coding.")
+  } else {
+    message("    OK: every death is coded as a PFS event.")
+  }
+}
+
 tki_dist <- df %>% count(tki_clean, name = "n", sort = TRUE)
 message("\n>>> Recorded TKI distribution:\n")
 print(tki_dist)
@@ -1329,6 +1367,28 @@ if (length(lot_rows) > 0) {
   print(bind_rows(lot_rows))
 }
 
+# --- 5.3 KM by Grade 3+ ADR (Objective 3) -------------------------------------------
+km_by_g3 <- function(d, endpoint_label, ylab, fname, ttl) {
+  dd <- d %>% filter(!is.na(flag_ADR_sev))
+  if (nrow(dd) < 5 || length(unique(dd$flag_ADR_sev)) < 2) return(invisible(NULL))
+  dd$g3lab <- factor(ifelse(dd$flag_ADR_sev, "Grade>=3 ADR", "No grade>=3 ADR"),
+                     levels = c("No grade>=3 ADR", "Grade>=3 ADR"))
+  fit <- survfit(Surv(Time, Event) ~ g3lab, data = dd)
+  p <- ggsurvplot(
+    fit, data = dd, pval = TRUE, conf.int = TRUE,
+    risk.table = TRUE, risk.table.height = 0.2,
+    legend.labs = c("No grade>=3 ADR", "Grade>=3 ADR"),
+    title = ttl, xlab = "Follow-up (months)", ylab = ylab, print = FALSE)
+  save_fig(p, fname)
+  invisible(logrank_p(dd, "g3lab"))
+}
+if (have_os)  km_by_g3(os_data,  "OS",  "Probability of survival",
+                       "O3_05_KM_OS_by_Grade3ADR.png",
+                       "Overall survival by Grade 3+ ADR")
+if (have_pfs) km_by_g3(pfs_data, "PFS", "Probability of being progression-free",
+                       "O3_06_KM_PFS_by_Grade3ADR.png",
+                       "Progression-free survival by Grade 3+ ADR")
+
 # --- 5.2 KM slide table by recorded TKI group (panel comments ii & iii) -----------------
 km_slide_table <- function(d, endpoint_label, time_label, gvar = "LOT") {
   d <- d[!is.na(d[[gvar]]), , drop = FALSE]
@@ -1485,18 +1545,44 @@ if (length(t1_rows) > 0) {
   print(tbl1)
 }
 
-# --- Cox models (OS and PFS) ------------------------------------------------------------
-# Panel comment (xi): Grade 3+ ADR status is FORCED into the multivariable
-# models (kept even if its univariable p >= 0.20); line of therapy is forced
-# in as well (panel comment x).
-force_vars <- intersect(c("flag_ADR_sev", "LOT"), names(os_data))
+# --- Grade 3+ ADR descriptive tables (Objective 3) -------------------------------------
+# Binary Grade>=3 ADR: 'Yes' -> TRUE; 'No'/'Not documented'/'Not applicable'
+# -> FALSE (to_flag semantics; stated as an assumption in the report).
+if (!is.null(colmap$adr_sev)) {
+  g3_raw <- df_groups %>%
+    mutate(Recorded = coalesce(as.character(.[[colmap$adr_sev]]), "NA")) %>%
+    count(Recorded, name = "n") %>%
+    mutate(Pct = round(100 * n / sum(n), 1))
+  g3_bin <- df_groups %>%
+    count(Grade3_ADR_binary = ifelse(flag_ADR_sev, "Yes", "No"), name = "n") %>%
+    mutate(Pct = round(100 * n / sum(n), 1))
+  g3_by_lot <- df_groups %>%
+    count(LOT, Grade3 = ifelse(flag_ADR_sev, "Yes", "No"), name = "n") %>%
+    group_by(LOT) %>%
+    mutate(Pct_of_line = round(100 * n / sum(n), 1)) %>%
+    ungroup()
+  save_csv(g3_raw, "O3_02a_Grade3ADR_Recorded_Categories.csv")
+  save_csv(g3_bin, "O3_02b_Grade3ADR_Binary.csv")
+  save_csv(g3_by_lot, "O3_02c_Grade3ADR_by_LOT.csv")
+  message(">>> Grade 3+ ADR descriptive tables:")
+  print(g3_bin); print(g3_by_lot)
+}
+
+# --- Cox models (OS and PFS) ------------------------------------------------------------ <- intersect(c("flag_ADR_sev", "LOT"), names(os_data))
+# Supervisor-specified ADJUSTED set (Objective 3): CML phase + gender + age +
+# LOT + Grade>=3 ADR. Fitted as a fixed multivariable model (no stepwise).
+adj_set <- c("Phase_group", "Sex", "Age_num", "LOT", "flag_ADR_sev")
 cox_os <- NULL
 cox_pfs <- NULL
 if (have_os && nrow(os_data) >= 10) {
-  cox_os <- run_cox_models(os_data, force_vars = intersect(force_vars, names(os_data)))
+  cox_os <- run_cox_models(os_data,
+                           force_vars = intersect(force_vars, names(os_data)),
+                           fixed_vars = intersect(adj_set, names(os_data)))
 }
 if (have_pfs && nrow(pfs_data) >= 10) {
-  cox_pfs <- run_cox_models(pfs_data, force_vars = intersect(force_vars, names(pfs_data)))
+  cox_pfs <- run_cox_models(pfs_data,
+                            force_vars = intersect(force_vars, names(pfs_data)),
+                            fixed_vars = intersect(adj_set, names(pfs_data)))
 }
 
 o3_univ <- tibble()
